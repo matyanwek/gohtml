@@ -10,6 +10,7 @@ type tokenKind int
 const (
 	invalidToken tokenKind = iota
 	textToken
+	verbatimToken
 	tagOpenToken
 	tagCloseToken
 	tagSelfcloseToken
@@ -22,6 +23,8 @@ func (kind tokenKind) String() string {
 	switch kind {
 	case textToken:
 		return "textToken"
+	case verbatimToken:
+		return "verbatimToken"
 	case tagOpenToken:
 		return "tagOpenToken"
 	case tagCloseToken:
@@ -169,6 +172,64 @@ func lexText(data []byte, loc Location) (tok token, newLoc Location, err error, 
 	return
 }
 
+func lexVerbatim(data []byte, loc Location, tagName string) (tok token, newLoc Location, err error, warn error) {
+	tok = token{Loc: loc}
+
+	closeTag := []byte("</" + tagName + ">")
+	newLoc, ok := stepUntil(data, closeTag, loc)
+	if !ok {
+		if len(bytes.TrimSpace(data[loc.Pos:newLoc.Pos])) == 0 {
+			// NOTE: trailing spaces after the closing </html> tag, likely
+			// trailing newlines; warn and ignore
+			warn = fmt.Errorf("%s: error lexing text: %w", loc, EofErr)
+			return
+		} else {
+			// data after closing </html>
+			// TODO: should this be a warning?
+			// it's recoverable by simply ignoring it
+			err = fmt.Errorf("%s: error lexing text: %w", loc, EofErr)
+			return
+		}
+	}
+
+	tok.Data = data[loc.Pos:newLoc.Pos]
+	tok.Kind = verbatimToken
+	return
+}
+
+// rune version of isSpace
+func isSpaceR(r rune) bool {
+	return r == '\t' || r == '\n' || r == '\f' || r == '\r' || r == ' '
+}
+
+func extractTagName(tok token) string {
+	if tok.Kind != tagOpenToken {
+		return ""
+	}
+
+	data := tok.Data
+	i := bytes.IndexFunc(data, isSpaceR)
+	if i >= 0 {
+		data = data[:i]
+	}
+
+	return string(bytes.ToLower(data))
+}
+
+var verbatimTags = map[string]bool{
+	"script": true,
+	"style":  true,
+	"pre":    true,
+}
+
+func inVerbatim(tokens []token) bool {
+	if len(tokens) == 0 {
+		return false
+	}
+	tok := tokens[len(tokens)-1]
+	return tok.Kind == tagOpenToken && verbatimTags[extractTagName(tok)]
+}
+
 func lex(data []byte) (tokens []token, err error, warns []error) {
 	if len(data) == 0 {
 		err = EmptyInputErr
@@ -197,9 +258,14 @@ func lex(data []byte) (tokens []token, err error, warns []error) {
 				tok, loc, err = lexTagOpen(data, loc)
 			}
 		default:
-			tok, loc, err, warn = lexText(data, loc)
-			if warn != nil {
-				warns = append(warns, warn)
+			if inVerbatim(tokens) {
+				tagName := extractTagName(tokens[len(tokens)-1])
+				tok, loc, err, warn = lexVerbatim(data, loc, tagName)
+			} else {
+				tok, loc, err, warn = lexText(data, loc)
+				if warn != nil {
+					warns = append(warns, warn)
+				}
 			}
 		}
 

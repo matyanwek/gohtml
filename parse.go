@@ -25,12 +25,6 @@ var unpairedTags = map[string]bool{
 	"wbr":      true,
 }
 
-var verbatimTags = map[string]bool{
-	"script": true,
-	"style":  true,
-	"pre":    true,
-}
-
 var (
 	equals = []byte("=")
 	amp    = []byte("&")
@@ -293,77 +287,14 @@ func parseOpenTag(tok token) (node *Node, err error, warns []error) {
 	return
 }
 
-func parseToken(tok token) (node *Node, err error, warns []error) {
-	switch tok.Kind {
-	case eofToken:
-		node = &Node{}
-		break
-	case commentToken:
-		node, err = parseComment(tok)
-	case declarationToken:
-		node, err = parseDeclaration(tok)
-	case textToken:
-		node, err, warns = parseText(tok)
-	case tagSelfcloseToken:
-		node, err, warns = parseOpenTag(tok)
-	case tagOpenToken:
-		node, err, warns = parseOpenTag(tok)
-	case tagCloseToken:
-		node, err = parseCloseTag(tok)
-	default:
-		err = fmt.Errorf("%s: error parsing document: %w: %s", tok.Loc, TokenErr, tok.Kind)
-	}
-	return
-}
-
-// Consume all tokens as raw text until finding a closing tag matching parent.
-// NOTE: Unescaped special chars like '<' HTML data should be a parse error,
-// but these are often found in "verbatim" tags (e.g. <script>).  Browsers seem
-// able to resolve these as raw text in the parent "verbatim" tag.
-func parseTokenVerbatim(tokens []token, i int, parent string) (*Node, int, error, []error) {
-	var warns []error
-	node := &Node{Kind: TextNode, Loc: tokens[i].Loc}
-	buf := bytes.Buffer{}
-	buf.Grow(1024)
-
-	for ; i < len(tokens); i++ {
-		tok := tokens[i]
-		switch tok.Kind {
-		case eofToken:
-			break
-		case tagCloseToken:
-			closeNode, err := parseCloseTag(tok)
-			if err != nil {
-				return node, i, err, warns
-			} else if closeNode.Content == parent {
-				node.Content = buf.String()
-				return node, i, nil, warns
-			}
-			fallthrough
-		case commentToken, declarationToken, tagSelfcloseToken, tagOpenToken:
-			warn := fmt.Errorf("%s: error parsing %q element: %w: %s", tok.Loc, parent, TokenErr, tok.Kind)
-			warns = append(warns, warn)
-			fallthrough
-		case textToken:
-			buf.Write(tok.Data)
-		default:
-			// An unknown tokenKind is a document error, not specific to
-			// a verbatim text element. Hence, "error parsing document".
-			err := fmt.Errorf("%s: error parsing document: %w: %s", tok.Loc, TokenErr, tok.Kind)
-			return node, i, err, warns
-		}
-	}
-
-	err := fmt.Errorf("%s: error parsing %q element: %w", node.Loc, parent, EofErr)
-	return node, i, err, warns
-}
-
 func parse(tokens []token) (docNode *Node, err error, warns []error) {
 	docNode = &Node{Kind: DocumentNode, Children: make([]*Node, 0, 4)}
 	tags := make(stack[*Node], 0, 16)
 	tags.Push(docNode)
 
 	i := 0
+
+loop:
 	for ; i < len(tokens); i++ {
 		tok := tokens[i]
 
@@ -373,40 +304,50 @@ func parse(tokens []token) (docNode *Node, err error, warns []error) {
 			return
 		}
 
-		if verbatimTags[parent.Content] {
-			node, newI, err, tokWarns := parseTokenVerbatim(tokens, i, parent.Content)
-			warns = append(warns, tokWarns...)
-			if err != nil {
-				return docNode, err, warns
-			}
-			i = newI
-			parent.Children = append(parent.Children, node)
-			tags.Pop()
-		} else {
-			node, err, tokWarns := parseToken(tok)
-			warns = append(warns, tokWarns...)
-			if err != nil {
-				return docNode, err, warns
-			}
+		var node *Node
+		var tokWarns []error
 
-			if tok.Kind == tagCloseToken {
-				// NOTE: a mismatch between the closing tag and the currently
-				// open tag should be invalid, but browsers seem to resolve
-				// this by ignoring the mismatched closing tag
-				if node.Content == parent.Content {
-					tags.Pop()
-				} else {
-					warn := fmt.Errorf("%s: error parsing closing tag: %w: expected %q but got %q", node.Loc, TagMismatchErr, parent.Content, node.Content)
-					warns = append(warns, warn)
-				}
+		switch tok.Kind {
+		case eofToken:
+			break loop
+		case commentToken:
+			node, err = parseComment(tok)
+		case declarationToken:
+			node, err = parseDeclaration(tok)
+		case verbatimToken:
+			node = &Node{Kind: TextNode, Loc: tok.Loc, Content: string(tok.Data)}
+		case textToken:
+			node, err, tokWarns = parseText(tok)
+		case tagSelfcloseToken:
+			node, err, tokWarns = parseOpenTag(tok)
+		case tagOpenToken:
+			node, err, tokWarns = parseOpenTag(tok)
+		case tagCloseToken:
+			node, err = parseCloseTag(tok)
+			if err != nil {
+				break
+			} else if node.Content == parent.Content {
+				tags.Pop()
+				continue loop
 			} else {
-				parent.Children = append(parent.Children, node)
-
-				if node.Kind == ElementNode && !unpairedTags[node.Content] {
-					tags.Push(node)
-				}
+				warn := fmt.Errorf("%s: error parsing closing tag: %w: expected %q but got %q", node.Loc, TagMismatchErr, parent.Content, node.Content)
+				tokWarns = append(tokWarns, warn)
 			}
+		default:
+			err = fmt.Errorf("%s: error parsing document: %w: %s", tok.Loc, TokenErr, tok.Kind)
 		}
+
+		if err != nil {
+			return
+		}
+
+		parent.Children = append(parent.Children, node)
+
+		if node.Kind == ElementNode && !unpairedTags[node.Content] {
+			tags.Push(node)
+		}
+
+		warns = append(warns, tokWarns...)
 	}
 
 	if len(tags) > 1 {
