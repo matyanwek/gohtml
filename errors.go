@@ -14,4 +14,5 @@ var (
 	EmptyContentErr  = errors.New("empty token content")
 	EmptyTagStackErr = errors.New("empty tag stack")
 	TagMismatchErr   = errors.New("mismatched tags")
+	AttrKeyErr       = errors.New("invalid attribute key")
 )

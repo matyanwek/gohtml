@@ -113,9 +113,9 @@ func expandEntitys(data []byte, loc Location) ([]byte, []error) {
 
 	for {
 		loc.Pos = 0
-		loc, ok := stepUntil(data, amp, loc)
+		loc := stepUntilPrefix(loc, data, amp)
 		buf.Write(data[:loc.Pos])
-		if !ok {
+		if loc.Pos >= len(data) {
 			break
 		}
 
@@ -183,66 +183,95 @@ func isSpace(c byte) bool {
 	return c == '\t' || c == '\n' || c == '\f' || c == '\r' || c == ' '
 }
 
-// Find the end of a tag field, which is either a space or a quote.
-func findAttrEnd(data []byte) int {
-	i := 0
-	for {
-		i++
-		if i >= len(data) || isSpace(data[i]) {
-			return i
-		} else if data[i] == '=' {
-			break
-		}
-	}
-
-	i += 1
-	if i >= len(data) || isSpace(data[i]) {
-		return i
-	}
-
-	// TODO: validate matching quotes; may need to return an error
-	if data[i] == '"' || data[i] == '\'' {
-		quote := data[i]
-		i++
-		for i < len(data) && data[i] != quote {
-			i++
-		}
-		i++
-	} else {
-		for i < len(data) && !isSpace(data[i]) {
-			i++
-		}
-	}
-
-	return i
-}
-
-// Split tags by "fields", such that all fields are separated by spaces that
-// are not escaped or quoted (e.g. <tag attr1=val attr2="val with space">
-// => ['tag', 'attr1=val', 'attr2="val with space"']).
-// Fields are enclosed in text tokens to report warning locations more easily.
-func splitAttrs(data []byte, loc Location) []token {
+// Split tag data by fields such that the first field is the tag name and
+// subsequent fields are attributes
+func splitTagFields(data []byte, loc Location) []token {
 	fields := make([]token, 0, 16)
 
+	notSpaces := func(d []byte) bool {
+		return len(d) <= 0 || !isSpace(d[0])
+	}
+
+	isSpacesOrEquals := func(d []byte) bool {
+		return len(d) <= 0 || isSpace(d[0]) || bytes.HasPrefix(d, equals)
+	}
+
 	loc.Pos = 0
-	for {
-		for loc.Pos < len(data) && isSpace(data[loc.Pos]) {
-			if data[loc.Pos] == '\n' {
-				loc.Line++
-				loc.Col = 0
-			}
-			loc.Col++
-			loc.Pos++
-		}
+	for loc.Pos < len(data) {
+		// skip over leading spaces
+		loc = stepUntil(loc, data, notSpaces)
 		if loc.Pos >= len(data) {
 			break
 		}
+		field := token{Kind: textToken, Loc: loc}
 
-		attrLen := findAttrEnd(data[loc.Pos:])
-		field := token{Kind: textToken, Loc: loc, Data: data[loc.Pos : loc.Pos+attrLen]}
+		// skip to space or '='
+		loc = stepUntil(loc, data, isSpacesOrEquals)
+		field.Data = data[field.Loc.Pos:loc.Pos]
+		if loc.Pos >= len(data) {
+			fields = append(fields, field)
+			break
+		}
+
+		// skip spaces until '='
+		loc = stepUntil(loc, data, notSpaces)
+		if loc.Pos >= len(data) {
+			fields = append(fields, field)
+			break
+		} else if !bytes.HasPrefix(data[loc.Pos:], equals) {
+			fields = append(fields, field)
+			continue
+		}
+
+		// append '=' to field
+		field.Data = append(field.Data, equals...)
+		loc.Pos += len(equals)
+		loc.Col += len(equals)
+		if loc.Pos >= len(data) {
+			fields = append(fields, field)
+			break
+		}
+
+		// skip spaces until attribute value
+		loc = stepUntil(loc, data, notSpaces)
+		if loc.Pos >= len(data) {
+			fields = append(fields, field)
+			break
+		}
+
+		// check for quote
+		if data[loc.Pos] == '"' || data[loc.Pos] == '\'' {
+			// step until matching quote
+			quote := data[loc.Pos]
+
+			newLoc := loc
+			newLoc.Pos++
+			newLoc.Col++
+
+			newLoc = stepUntil(newLoc, data, func(d []byte) bool {
+				return len(d) <= 0 || d[0] == quote
+			})
+			if newLoc.Pos < len(data) {
+				newLoc.Pos++
+			}
+
+			field.Data = append(field.Data, data[loc.Pos:newLoc.Pos]...)
+			loc = newLoc
+
+		} else {
+			// step until space (or equals)
+			newLoc := stepUntil(loc, data, isSpacesOrEquals)
+
+			// check that next char is not '=' (that would indicate this is
+			// the next key); if not, append to field.Data
+			if !bytes.HasPrefix(data[newLoc.Pos:], equals) {
+				field.Data = append(field.Data, data[loc.Pos:newLoc.Pos]...)
+			}
+
+			loc = newLoc
+		}
+
 		fields = append(fields, field)
-		loc.Pos += attrLen
-		loc.Col += attrLen
 	}
 
 	return fields
@@ -258,7 +287,6 @@ func parseAttr(field token) (key string, val string, warns []error) {
 		field.Loc.Col += len(keyData) + len(equals)
 
 		valData = bytes.Trim(valData, "\"'")
-		// TODO: should entities not be expanded in href attributes?
 		valData, warns = expandEntitys(valData, field.Loc)
 	}
 	return string(keyData), string(valData), warns
@@ -267,7 +295,7 @@ func parseAttr(field token) (key string, val string, warns []error) {
 func parseOpenTag(tok token) (node *Node, err error, warns []error) {
 	node = &Node{Kind: ElementNode, Loc: tok.Loc}
 
-	fields := splitAttrs(tok.Data, tok.Loc)
+	fields := splitTagFields(tok.Data, tok.Loc)
 	if len(fields) == 0 {
 		err = fmt.Errorf("%s: error parsing opening tag: %w", tok.Loc, EmptyContentErr)
 		return
@@ -275,12 +303,17 @@ func parseOpenTag(tok token) (node *Node, err error, warns []error) {
 
 	node.Children = make([]*Node, 0, 16)
 
-	node.Content = string(fields[0].Data)
+	node.Content = string(bytes.ToLower(fields[0].Data))
 
 	node.Attrs = make(map[string]string, len(fields)-1)
 	for _, field := range fields[1:] {
 		key, val, fieldWarns := parseAttr(field)
-		node.Attrs[key] = val
+		if _, ok := node.Attrs[key]; ok {
+			warn := fmt.Errorf("%s:%w: repeated key %q", field.Loc, AttrKeyErr, key)
+			warns = append(warns, warn)
+		} else {
+			node.Attrs[key] = val
+		}
 		warns = append(warns, fieldWarns...)
 	}
 

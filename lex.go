@@ -52,18 +52,25 @@ func (tok token) String() string {
 	return fmt.Sprintf("%s: %s %q", tok.Loc, tok.Kind, tok.Data)
 }
 
-func stepUntil(data []byte, prefix []byte, loc Location) (Location, bool) {
-	for loc.Pos < len(data) && !bytes.HasPrefix(data[loc.Pos:], prefix) {
+func stepUntil(loc Location, data []byte, pred func([]byte) bool) Location {
+	for loc.Pos < len(data) && !pred(data[loc.Pos:]) {
 		if data[loc.Pos] == '\n' {
 			loc.Line++
 			loc.Col = 1
-		} else {
+		} else if data[loc.Pos] != '\r' {
 			loc.Col++
 		}
+
 		loc.Pos++
 	}
 
-	return loc, loc.Pos < len(data)
+	return loc
+}
+
+func stepUntilPrefix(loc Location, data []byte, prefix []byte) Location {
+	return stepUntil(loc, data, func(innerData []byte) bool {
+		return bytes.HasPrefix(innerData, prefix)
+	})
 }
 
 var (
@@ -80,8 +87,8 @@ func lexComment(data []byte, loc Location) (token, Location, error) {
 	tok := token{Loc: loc}
 
 	loc.Pos += len(commentStart)
-	newLoc, ok := stepUntil(data, commentEnd, loc)
-	if !ok {
+	newLoc := stepUntilPrefix(loc, data, commentEnd)
+	if newLoc.Pos >= len(data) {
 		err := fmt.Errorf("%s: error lexing comment: %w", loc, EofErr)
 		return tok, newLoc, err
 	}
@@ -97,8 +104,8 @@ func lexDeclaration(data []byte, loc Location) (token, Location, error) {
 	tok := token{Loc: loc}
 
 	loc.Pos += len(declarationStart)
-	newLoc, ok := stepUntil(data, tagEnd, loc)
-	if !ok {
+	newLoc := stepUntilPrefix(loc, data, tagEnd)
+	if newLoc.Pos >= len(data) {
 		err := fmt.Errorf("%s: error lexing declaration: %w", loc, EofErr)
 		return tok, newLoc, err
 	}
@@ -114,8 +121,8 @@ func lexTagClose(data []byte, loc Location) (token, Location, error) {
 	tok := token{Loc: loc}
 
 	loc.Pos += len(closeTagStart)
-	newLoc, ok := stepUntil(data, tagEnd, loc)
-	if !ok {
+	newLoc := stepUntilPrefix(loc, data, tagEnd)
+	if newLoc.Pos >= len(data) {
 		err := fmt.Errorf("%s: error lexing closing tag: %w", loc, EofErr)
 		return tok, newLoc, err
 	}
@@ -131,8 +138,8 @@ func lexTagOpen(data []byte, loc Location) (token, Location, error) {
 	tok := token{Loc: loc}
 
 	loc.Pos += 1
-	newLoc, ok := stepUntil(data, tagEnd, loc)
-	if !ok {
+	newLoc := stepUntilPrefix(loc, data, tagEnd)
+	if newLoc.Pos >= len(data) {
 		err := fmt.Errorf("%s: error lexing opening tag: %w", loc, EofErr)
 		return tok, newLoc, err
 	}
@@ -152,8 +159,8 @@ func lexTagOpen(data []byte, loc Location) (token, Location, error) {
 
 func lexText(data []byte, loc Location) (tok token, newLoc Location, err error, warn error) {
 	tok = token{Loc: loc}
-	newLoc, ok := stepUntil(data, tagStart, loc)
-	if !ok {
+	newLoc = stepUntilPrefix(loc, data, tagStart)
+	if newLoc.Pos >= len(data) {
 		if len(bytes.TrimSpace(data[loc.Pos:newLoc.Pos])) == 0 {
 			// NOTE: trailing spaces after the closing </html> tag, likely
 			// trailing newlines; warn and ignore
@@ -176,8 +183,8 @@ func lexVerbatim(data []byte, loc Location, tagName string) (tok token, newLoc L
 	tok = token{Loc: loc}
 
 	closeTag := []byte("</" + tagName + ">")
-	newLoc, ok := stepUntil(data, closeTag, loc)
-	if !ok {
+	newLoc = stepUntilPrefix(loc, data, closeTag)
+	if newLoc.Pos >= len(data) {
 		if len(bytes.TrimSpace(data[loc.Pos:newLoc.Pos])) == 0 {
 			// NOTE: trailing spaces after the closing </html> tag, likely
 			// trailing newlines; warn and ignore
