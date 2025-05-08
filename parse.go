@@ -7,18 +7,21 @@ import (
 )
 
 var unpairedTags = map[string]bool{
+	"area":     true,
+	"base":     true,
 	"br":       true,
+	"colgroup": true,
+	"col":      true,
+	"embed":    true,
 	"hr":       true,
 	"image":    true,
 	"img":      true,
 	"input":    true,
-	"meta":     true,
 	"link":     true,
-	"area":     true,
-	"base":     true,
-	"colgroup": true,
+	"meta":     true,
 	"param":    true,
 	"source":   true,
+	"track":    true,
 	"wbr":      true,
 }
 
