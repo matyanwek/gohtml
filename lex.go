@@ -182,8 +182,10 @@ func lexText(data []byte, loc Location) (tok token, newLoc Location, err error, 
 func lexVerbatim(data []byte, loc Location, tagName string) (tok token, newLoc Location, err error, warn error) {
 	tok = token{Loc: loc}
 
-	closeTag := []byte("</" + tagName + ">")
-	newLoc = stepUntilPrefix(loc, data, closeTag)
+	closeTag := []byte("</" + tagName)
+	newLoc = stepUntil(loc, data, func(d []byte) bool {
+		return len(data) < len(closeTag) || bytes.HasPrefix(bytes.ToLower(d[:len(closeTag)]), closeTag)
+	})
 	if newLoc.Pos >= len(data) {
 		if len(bytes.TrimSpace(data[loc.Pos:newLoc.Pos])) == 0 {
 			// NOTE: trailing spaces after the closing </html> tag, likely
